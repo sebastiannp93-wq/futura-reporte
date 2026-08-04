@@ -2,7 +2,7 @@ name: Refrescar reporte Futura
 
 on:
   schedule:
-    - cron: '0 11 * * 1'    # cada lunes 11:00 UTC (6:00 a.m. Colombia)
+    - cron: '0 12 * * *'    # todos los días 12:00 UTC (7:00 a.m. Colombia)
   workflow_dispatch:          # permite ejecutarlo manualmente con un botón
 
 permissions:
