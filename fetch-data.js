@@ -53,18 +53,27 @@ async function graphAll(path, params){
   return rows;
 }
 
-// El evento QualifiedLead llega en la API directa bajo la etiqueta
-// "offsite_conversion.fb_pixel_custom" (evento de píxel personalizado).
-function qlValue(actions){
+/* ---------- MQL (evento QualifiedLead únicamente) ----------
+   Se lee del campo `results` de Meta, que trae el QualifiedLead con su
+   nombre exacto. Dos casos, validados contra Ads Manager:
+   - indicador "conversions:...QualifiedLead"  -> QualifiedLead puro = value.
+   - indicador "actions:...add_meta_leads...QualifiedLead" -> viene sumado con
+     los leads de Meta; MQL puro = value - onsite_conversion.lead_grouped.
+   Si un anuncio NO tiene indicador QualifiedLead -> no es del programa MQL (excluido).
+   (Semana 2-8 mar validada: MX = 70. Semana 15-21 jun: MX 68, CO 9.)         */
+function metaLeads(actions){
   if (!Array.isArray(actions)) return 0;
+  const a = actions.find(x => x.action_type === 'onsite_conversion.lead_grouped');
+  return a ? (parseFloat(a.value)||0) : 0;
+}
+function qlFromResults(results, actions){
+  const entries = Array.isArray(results) ? results : (results ? [results] : []);
+  const ql = entries.find(e => e && typeof e.indicator === 'string' && /qualifiedlead/i.test(e.indicator));
+  if (!ql) return { mql: 0, inProgram: false };
   let v = 0;
-  for (const a of actions){
-    const t = a && a.action_type;
-    if (typeof t === 'string' && (/fb_pixel_custom/i.test(t) || /qualifiedlead/i.test(t) || /offsite_conversion\.custom\./i.test(t))){
-      v += parseFloat(a.value) || 0;
-    }
-  }
-  return v;
+  if (ql.values && ql.values[0] && ql.values[0].value != null) v = parseFloat(ql.values[0].value) || 0;
+  if (/add_meta_leads/i.test(ql.indicator)) v = Math.max(0, v - metaLeads(actions));
+  return { mql: v, inProgram: true };
 }
 function linkClicks(actions){
   if (!Array.isArray(actions)) return 0;
@@ -73,7 +82,7 @@ function linkClicks(actions){
 }
 function country(name){ const n=(name||'').toLowerCase(); if(n.startsWith('mx_'))return 'MX'; if(n.startsWith('co_'))return 'CO'; return null; }
 
-const INSIGHT_FIELDS = 'ad_id,ad_name,adset_id,campaign_id,impressions,reach,spend,clicks,actions';
+const INSIGHT_FIELDS = 'ad_id,ad_name,adset_id,campaign_id,impressions,reach,spend,clicks,actions,results';
 
 async function fetchInsights(timeIncrement, since, until){
   const raw = await graphAll(`act_${AD_ACCOUNT_ID}/insights`, {
@@ -85,10 +94,9 @@ async function fetchInsights(timeIncrement, since, until){
   return raw.filter(r => country(r.ad_name) && (parseFloat(r.impressions)||0) > 0);
 }
 
-function toReportRow(r, qlCampaigns){
-  const ql = qlValue(r.actions);
-  const inProgram = qlCampaigns.has(String(r.campaign_id));
-  const resultsLabel = inProgram ? `${ql} (QualifiedLead)` : `0 (Otros)`;
+function toReportRow(r){
+  const { mql, inProgram } = qlFromResults(r.results, r.actions);
+  const resultsLabel = inProgram ? `${mql} (QualifiedLead)` : `0 (Otros)`;
   return {
     id: r.ad_id, name: r.ad_name, adset_id: r.adset_id, campaign_id: r.campaign_id,
     creative_id: null,
@@ -118,25 +126,23 @@ function toReportRow(r, qlCampaigns){
   }
   console.log('Weekly filas:', weeklyRaw.length);
 
-  // --- AUTO-VALIDACIÓN: semana 15-21 jun (ya validada: MX 68, CO 9, total 77) ---
-  let vMX=0, vCO=0, vUgly=0;
-  weeklyRaw.filter(r => r.date_start === '2026-06-15').forEach(r => {
-    const q = qlValue(r.actions); const c = country(r.ad_name);
-    if (c==='MX') vMX += q; if (c==='CO') vCO += q;
-    if (r.ad_name === 'mx_img_mt_ugly_abril_h4') vUgly += q;
-  });
-  console.log(`>>> VALIDACION semana 15-21 jun: MX=${vMX} CO=${vCO} TOTAL=${vMX+vCO} (esperado 68/9/77) | ugly_abril_h4=${vUgly} (esperado 7)`);
-  // ---------------------------------------------------------------------------
+  // --- AUTO-VALIDACIÓN contra Ads Manager ---
+  const _s = weeklyRaw.find(r => r.results);
+  if (_s) console.log('>>> EJEMPLO results:', _s.ad_name, JSON.stringify(_s.results));
+  function sumMX(dateStart){
+    let t=0; weeklyRaw.filter(r => r.date_start===dateStart && country(r.ad_name)==='MX')
+      .forEach(r => { t += qlFromResults(r.results, r.actions).mql; }); return t;
+  }
+  function sumCO(dateStart){
+    let t=0; weeklyRaw.filter(r => r.date_start===dateStart && country(r.ad_name)==='CO')
+      .forEach(r => { t += qlFromResults(r.results, r.actions).mql; }); return t;
+  }
+  console.log(`>>> VALIDACION 2-8 mar: MX=${sumMX('2026-03-02')} (esperado 70)`);
+  console.log(`>>> VALIDACION 15-21 jun: MX=${sumMX('2026-06-15')} CO=${sumCO('2026-06-15')} (esperado 68 / 9)`);
 
   console.log('Monthly...');
   const monthlyRaw = await fetchInsights('monthly', '2026-01-01', today);
   console.log('Monthly filas:', monthlyRaw.length);
-
-  const qlCampaigns = new Set();
-  for (const r of weeklyRaw.concat(monthlyRaw)){
-    if (qlValue(r.actions) > 0) qlCampaigns.add(String(r.campaign_id));
-  }
-  console.log('Campañas QL detectadas:', qlCampaigns.size);
 
   const campsData = await graphAll(`act_${AD_ACCOUNT_ID}/campaigns`, { fields: 'id,name' });
   const campaigns = {};
@@ -151,8 +157,8 @@ function toReportRow(r, qlCampaigns){
     }
   });
 
-  const weekly = weeklyRaw.map(r => { const o = toReportRow(r, qlCampaigns); o.creative_id = adCreative[String(r.ad_id)]||null; return o; });
-  const monthly = monthlyRaw.map(r => { const o = toReportRow(r, qlCampaigns); o.creative_id = adCreative[String(r.ad_id)]||null; return o; });
+  const weekly = weeklyRaw.map(r => { const o = toReportRow(r); o.creative_id = adCreative[String(r.ad_id)]||null; return o; });
+  const monthly = monthlyRaw.map(r => { const o = toReportRow(r); o.creative_id = adCreative[String(r.ad_id)]||null; return o; });
 
   const sixWeeksAgo = isoAddDays(today, -42);
   const spendByAd = {};
@@ -172,5 +178,5 @@ function toReportRow(r, qlCampaigns){
   const generated = `${String(now.getUTCDate()).padStart(2,'0')}/${String(now.getUTCMonth()+1).padStart(2,'0')}/${now.getUTCFullYear()} ${String(now.getUTCHours()).padStart(2,'0')}:${String(now.getUTCMinutes()).padStart(2,'0')} UTC`;
   const snap = { generated, campaigns, weekly, monthly, creatives, previews };
   require('fs').writeFileSync('futura-data.js', 'window.__FUTURA_SNAPSHOT__=' + JSON.stringify(snap) + ';');
-  console.log('=== futura-data.js generado | weekly:', weekly.length, '| QL campañas:', qlCampaigns.size, '| generated:', generated, '===');
+  console.log('=== futura-data.js generado | weekly:', weekly.length, '| generated:', generated, '===');
 })().catch(e => { console.error('ERROR FATAL:', e); process.exit(1); });
