@@ -53,11 +53,14 @@ async function graphAll(path, params){
   return rows;
 }
 
+// El evento QualifiedLead llega en la API directa bajo la etiqueta
+// "offsite_conversion.fb_pixel_custom" (evento de píxel personalizado).
 function qlValue(actions){
   if (!Array.isArray(actions)) return 0;
   let v = 0;
   for (const a of actions){
-    if (a && typeof a.action_type === 'string' && /qualifiedlead/i.test(a.action_type)){
+    const t = a && a.action_type;
+    if (typeof t === 'string' && (/fb_pixel_custom/i.test(t) || /qualifiedlead/i.test(t) || /offsite_conversion\.custom\./i.test(t))){
       v += parseFloat(a.value) || 0;
     }
   }
@@ -115,16 +118,15 @@ function toReportRow(r, qlCampaigns){
   }
   console.log('Weekly filas:', weeklyRaw.length);
 
-  // --- DIAGNÓSTICO: nombres reales de los eventos que entrega Meta ---
-  const _types = {};
-  weeklyRaw.forEach(r => (r.actions || []).forEach(a => { _types[a.action_type] = (_types[a.action_type]||0)+1; }));
-  const _sorted = Object.keys(_types).sort();
-  console.log('>>> ACTION_TYPES (' + _sorted.length + '):', JSON.stringify(_sorted));
-  const _lead = _sorted.filter(t => /lead|qualif|custom|conversion/i.test(t));
-  console.log('>>> POSIBLES DE LEAD/CONVERSION:', JSON.stringify(_lead));
-  const _sample = weeklyRaw.find(r => Array.isArray(r.actions) && r.actions.length);
-  if (_sample) console.log('>>> EJEMPLO ACCIONES:', _sample.ad_name, JSON.stringify(_sample.actions));
-  // ------------------------------------------------------------------
+  // --- AUTO-VALIDACIÓN: semana 15-21 jun (ya validada: MX 68, CO 9, total 77) ---
+  let vMX=0, vCO=0, vUgly=0;
+  weeklyRaw.filter(r => r.date_start === '2026-06-15').forEach(r => {
+    const q = qlValue(r.actions); const c = country(r.ad_name);
+    if (c==='MX') vMX += q; if (c==='CO') vCO += q;
+    if (r.ad_name === 'mx_img_mt_ugly_abril_h4') vUgly += q;
+  });
+  console.log(`>>> VALIDACION semana 15-21 jun: MX=${vMX} CO=${vCO} TOTAL=${vMX+vCO} (esperado 68/9/77) | ugly_abril_h4=${vUgly} (esperado 7)`);
+  // ---------------------------------------------------------------------------
 
   console.log('Monthly...');
   const monthlyRaw = await fetchInsights('monthly', '2026-01-01', today);
