@@ -807,17 +807,36 @@ async function renderCreativesSection(container){
   const totalSpend = creatives.reduce((a,c)=>a+c.spend,0);
   const totalMql = creatives.reduce((a,c)=>a+c.mql,0);
   const avgCpmql = safeDiv(totalSpend, totalMql);
-  const withMql = creatives.filter(c=>c.mql>0);
-  const top3 = [...withMql].sort((a,b)=> b.mql-a.mql || (a.cpmql||1e12)-(b.cpmql||1e12)).slice(0,3);
-  const bottomPool = creatives.filter(c=> c.spend>5 && !top3.includes(c));
-  const bottom3 = [...bottomPool].sort((a,b)=>{
-    const aS = a.mql===0 ? 1e12 + a.spend : (a.cpmql||0);
-    const bS = b.mql===0 ? 1e12 + b.spend : (b.cpmql||0);
-    return bS-aS;
-  }).slice(0,3);
+  // --- Evaluación (USD): bandas de CPMQL + umbral de gasto para juzgar ---
+  const CPMQL_BUENO = 100, CPMQL_MALO = 130, GASTO_MIN = 200;
+  const judged = creatives.filter(c=> c.spend >= GASTO_MIN);
+  const avgMqlJudged = judged.length ? judged.reduce((a,c)=>a+c.mql,0)/judged.length : 0;
+  function bandOf(c){ if(c.mql===0||c.cpmql===null) return 'malo'; return c.cpmql<=CPMQL_BUENO?'bueno':(c.cpmql<=CPMQL_MALO?'aceptable':'malo'); }
+  function quadrant(c){
+    if(c.spend < GASTO_MIN) return 'aprendizaje';
+    const b = bandOf(c); const alto = c.mql>0 && c.mql >= avgMqlJudged;
+    if(b==='malo') return 'cortar';
+    if(b==='bueno') return alto?'estrella':'promesa';
+    return alto?'motor':'vigilar';
+  }
+  function qChip(c){
+    const m={estrella:['var(--green-soft)','var(--green)','Estrella'],motor:['var(--amber-soft)','var(--amber)','Motor'],promesa:['var(--blue-soft)','var(--blue)','Promesa'],vigilar:['var(--amber-soft)','var(--amber)','Vigilar'],cortar:['var(--red-soft)','var(--red)','Cortar'],aprendizaje:['#eef0f4','var(--muted)','En aprendizaje']};
+    const v=m[quadrant(c)]; return `<span class="chip" style="background:${v[0]};color:${v[1]};font-weight:600;">${v[2]}</span>`;
+  }
+  function cpmqlChip(c){
+    if(c.mql===0||c.cpmql===null) return `<span class="chip" style="background:var(--red-soft);color:var(--red);">CPMQL —</span>`;
+    const b=bandOf(c); const col=b==='bueno'?['var(--green-soft)','var(--green)']:(b==='aceptable'?['var(--amber-soft)','var(--amber)']:['var(--red-soft)','var(--red)']);
+    return `<span class="chip" style="background:${col[0]};color:${col[1]};">CPMQL ${fmtUSD2(c.cpmql)}</span>`;
+  }
+  // Mejores = eficientes con volumen (bueno/aceptable), priorizando banda y luego volumen
+  const top3 = judged.filter(c=> c.mql>0 && c.cpmql!==null && c.cpmql<=CPMQL_MALO)
+    .sort((a,b)=> ((bandOf(a)==='bueno'?0:1)-(bandOf(b)==='bueno'?0:1)) || (b.mql-a.mql) || ((a.cpmql||1e12)-(b.cpmql||1e12))).slice(0,3);
+  // Peores = fugas reales: gastó ≥umbral y es malo o 0 MQL, ordenado por plata quemada
+  const bottom3 = judged.filter(c=> !top3.includes(c) && (c.mql===0 || (c.cpmql!==null && c.cpmql>CPMQL_MALO)))
+    .sort((a,b)=> b.spend-a.spend).slice(0,3);
 
-  container.innerHTML = `<div class="card"><h2>Top 3 mejores creativos</h2><p class="desc">Semana del ${labelWeekFull(wk)} · País: ${STATE.country==='ALL'?'Todos':STATE.country}. Mayor volumen de MQL con CPMQL sano. Anuncios con el mismo nombre en varias campañas se unifican.</p><div class="creative-grid" id="topCreatives"><p class="small-note">Cargando…</p></div></div>
-  <div class="card"><h2>Top 3 peores creativos</h2><p class="desc">Sin MQL o con CPMQL más elevado, con gasto no despreciable.</p><div class="creative-grid" id="bottomCreatives"><p class="small-note">Cargando…</p></div></div>`;
+  container.innerHTML = `<div class="card"><h2>Top 3 mejores creativos</h2><p class="desc">Semana del ${labelWeekFull(wk)} · País: ${STATE.country==='ALL'?'Todos':STATE.country}. Eficientes con volumen: CPMQL bueno (≤$100) o aceptable (≤$130), con gasto ≥$200 para juzgar. Anuncios con el mismo nombre se unifican.</p><div class="creative-grid" id="topCreatives"><p class="small-note">Cargando…</p></div></div>
+  <div class="card"><h2>Top 3 peores creativos</h2><p class="desc">Fugas reales: gastaron ≥$200 y quedaron en CPMQL malo (&gt;$130) o 0 MQL. Ordenados por plata quemada. Los de gasto &lt;$200 no se juzgan (en aprendizaje).</p><div class="creative-grid" id="bottomCreatives"><p class="small-note">Cargando…</p></div></div>`;
 
   const all6 = [...top3, ...bottom3];
   const [creativeMeta] = await Promise.all([
@@ -864,9 +883,9 @@ async function renderCreativesSection(container){
       <div class="body">
         <div class="name"><span class="pill ${c.country.toLowerCase()}">${c.country}</span> ${c.name}</div>
         <div class="metrics">
+          ${qChip(c)}
           <span class="chip">${fmtNum(c.mql)} MQL</span>
-          <span class="chip ${kind==='top'?'good':'bad'}">CPMQL ${fmtUSD2(c.cpmql)}</span>
-          ${vsAvg!==null?`<span class="chip ${vsAvg<=0?'good':'bad'}">${vsAvg<=0?'':'+'}${vsAvg.toFixed(0)}% vs. prom. (${fmtUSD2(avgCpmql)})</span>`:''}
+          ${cpmqlChip(c)}
           ${spendShare!==null?`<span class="chip">${spendShare.toFixed(1)}% del gasto</span>`:''}
         </div>
         ${link?`<a class="preview" href="${link}" target="_blank" rel="noopener">Ver anuncio ↗</a>`:'<span class="small-note">Preview no disponible</span>'}
@@ -876,7 +895,7 @@ async function renderCreativesSection(container){
   const topEl = document.getElementById('topCreatives');
   const botEl = document.getElementById('bottomCreatives');
   if(topEl) topEl.innerHTML = top3.map(c=>renderCard(cardHtml(c,'top'))).join('') || '<p class="small-note">Sin creativos con MQL en esta semana/país.</p>';
-  if(botEl) botEl.innerHTML = bottom3.map(c=>renderCard(cardHtml(c,'bottom'))).join('') || '<p class="small-note">Sin datos suficientes.</p>';
+  if(botEl) botEl.innerHTML = bottom3.map(c=>renderCard(cardHtml(c,'bottom'))).join('') || '<p class="small-note">Sin fugas esta semana: ningún creativo con gasto ≥$200 quedó en CPMQL malo (&gt;$130) ni en 0 MQL.</p>';
   return {creatives, wk};
 }
 
@@ -1015,19 +1034,20 @@ function renderNextSteps(){
   const creatives = dedupCreatives(WEEKLY.filter(scope));
   const totalSpend = creatives.reduce((a,c)=>a+c.spend,0);
   const avgCpmql = safeDiv(totalSpend, creatives.reduce((a,c)=>a+c.mql,0));
+  const CPMQL_BUENO = 100, CPMQL_MALO = 130, GASTO_MIN = 200;
   const recs = [];
-  // 1) recortar al perdedor y realocar (mayor impacto directo)
-  const winners = creatives.filter(c=> c.mql>=2 && avgCpmql && c.cpmql < avgCpmql*0.75).sort((a,b)=>(a.cpmql||1e12)-(b.cpmql||1e12));
-  const losers = creatives.filter(c=> totalSpend>0 && c.spend > totalSpend*0.07 && (c.mql===0 || (avgCpmql && c.cpmql > avgCpmql*1.6))).sort((a,b)=>b.spend-a.spend);
+  // 1) recortar la fuga (malo o 0 MQL con gasto suficiente) y realocar
+  const winners = creatives.filter(c=> c.spend>=GASTO_MIN && c.mql>0 && c.cpmql!==null && c.cpmql<=CPMQL_BUENO).sort((a,b)=> (b.mql-a.mql) || ((a.cpmql||1e12)-(b.cpmql||1e12)));
+  const losers = creatives.filter(c=> c.spend>=GASTO_MIN && (c.mql===0 || (c.cpmql!==null && c.cpmql>CPMQL_MALO))).sort((a,b)=>b.spend-a.spend);
   if(losers.length){
     const l = losers[0]; const w = winners[0];
     const estMql = (w && w.cpmql) ? Math.floor(l.spend / w.cpmql) : (avgCpmql? Math.floor(l.spend/avgCpmql):null);
-    recs.push(`<b>Recorta o pausa "${l.name}"</b>: gastó ${fmtUSD(l.spend)} (${(l.spend/totalSpend*100).toFixed(0)}% del total) con ${l.mql===0?'0 MQL':fmtNum(l.mql)+' MQL a CPMQL '+fmtUSD2(l.cpmql)+' (promedio: '+fmtUSD2(avgCpmql)+')'}. Reasignar ese presupuesto ${w?'a "'+w.name+'"':'a los creativos con mejor CPMQL'}${estMql?' podría producir ~'+estMql+' MQL más por semana a costos actuales':''}.`);
+    recs.push(`<b>Recorta o pausa "${l.name}"</b>: gastó ${fmtUSD(l.spend)} (${(l.spend/totalSpend*100).toFixed(0)}% del total) con ${l.mql===0?'0 MQL':fmtNum(l.mql)+' MQL a CPMQL '+fmtUSD2(l.cpmql)+', por encima de tu techo de $130'}. Reasignar ese presupuesto ${w?'a "'+w.name+'"':'a los creativos eficientes (CPMQL ≤$100)'}${estMql?' podría producir ~'+estMql+' MQL más por semana a costos actuales':''}.`);
   }
   // 2) escalar al ganador si aún tiene poco share
   if(winners.length){
     const w = winners[0]; const share = totalSpend? w.spend/totalSpend:0;
-    if(share < 0.3) recs.push(`<b>Escala "${w.name}"</b>: CPMQL ${fmtUSD2(w.cpmql)} (${((w.cpmql-avgCpmql)/avgCpmql*100).toFixed(0)}% vs. promedio) con solo ${(share*100).toFixed(1)}% del gasto. Sube su presupuesto +30–50% de forma gradual (espera ~48h entre cambios para no reiniciar el aprendizaje) y, si aún no corre en el otro país, duplícalo allá.`);
+    if(share < 0.3) recs.push(`<b>Escala "${w.name}"</b>: CPMQL ${fmtUSD2(w.cpmql)} (banda buena, ≤$100) con solo ${(share*100).toFixed(1)}% del gasto. Sube su presupuesto +30–50% de forma gradual (espera ~48h entre cambios para no reiniciar el aprendizaje) y, si aún no corre en el otro país, duplícalo allá.`);
   }
   // 3) arbitraje entre países (solo con filtro Todos)
   if(STATE.country==='ALL'){
@@ -1055,9 +1075,9 @@ function renderNextSteps(){
   // 6) ángulo ganador sub-representado
   const byAngle={};
   creatives.forEach(c=>{ byAngle[c.angle]=byAngle[c.angle]||{mql:0,spend:0,n:0}; byAngle[c.angle].mql+=c.mql; byAngle[c.angle].spend+=c.spend; byAngle[c.angle].n++; });
-  const bestA = Object.entries(byAngle).map(([k,v])=>({k,...v,cpmql:safeDiv(v.spend,v.mql)})).filter(x=>x.mql>=2 && x.cpmql && avgCpmql && x.cpmql<avgCpmql).sort((a,b)=>b.mql-a.mql)[0];
+  const bestA = Object.entries(byAngle).map(([k,v])=>({k,...v,cpmql:safeDiv(v.spend,v.mql)})).filter(x=>x.mql>=2 && x.cpmql && x.cpmql<=CPMQL_MALO).sort((a,b)=>b.mql-a.mql)[0];
   if(bestA && creatives.length && bestA.n/creatives.length < 0.25){
-    recs.push(`<b>Produce más variantes del ángulo "${bestA.k}"</b>: genera ${fmtNum(bestA.mql)} MQL a CPMQL ${fmtUSD2(bestA.cpmql)} (mejor que el promedio) pero solo son ${bestA.n} de ${creatives.length} creativos activos. Brief para 2–3 piezas nuevas de este ángulo, en video e imagen.`);
+    recs.push(`<b>Produce más variantes del ángulo "${bestA.k}"</b>: genera ${fmtNum(bestA.mql)} MQL a CPMQL ${fmtUSD2(bestA.cpmql)} (dentro de tu techo) pero solo son ${bestA.n} de ${creatives.length} creativos activos. Brief para 2–3 piezas nuevas de este ángulo, en video e imagen.`);
   }
   const top3 = recs.slice(0,3);
   const body = top3.length
