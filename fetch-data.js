@@ -44,7 +44,7 @@ async function graphAll(path, params){
   let rows = [];
   let after = null;
   do{
-    const p = { ...params, limit: 300 };
+    const p = { limit: 300, ...params };
     if (after) p.after = after;
     const json = await graph(path, p);
     if (json.data) rows = rows.concat(json.data);
@@ -160,7 +160,7 @@ function toReportRow(r){
   const campaigns = {};
   campsData.forEach(c => { campaigns[String(c.id)] = c.name; });
 
-  const adsData = await graphAll(`act_${AD_ACCOUNT_ID}/ads`, { fields: 'id,creative{id,thumbnail_url,body,title}' });
+  const adsData = await graphAll(`act_${AD_ACCOUNT_ID}/ads`, { fields: 'id,creative{id,thumbnail_url,body,title}', limit: 40 });
   const adCreative = {}; const creatives = {};
   adsData.forEach(a => {
     if (a.creative && a.creative.id){
