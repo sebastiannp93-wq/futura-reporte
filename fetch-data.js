@@ -140,8 +140,20 @@ function toReportRow(r){
   console.log(`>>> VALIDACION 2-8 mar: MX=${sumMX('2026-03-02')} (esperado 70)`);
   console.log(`>>> VALIDACION 15-21 jun: MX=${sumMX('2026-06-15')} CO=${sumCO('2026-06-15')} (esperado 68 / 9)`);
 
-  console.log('Monthly...');
-  const monthlyRaw = await fetchInsights('monthly', '2026-01-01', today);
+  console.log('Monthly (mes por mes)...');
+  let monthlyRaw = [];
+  { let y = 2026, mo = 1;
+    while (true){
+      const since = `${y}-${String(mo).padStart(2,'0')}-01`;
+      if (since > today) break;
+      const lastDay = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+      let until = `${y}-${String(mo).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+      if (until > today) until = today;
+      console.log(`Monthly ${since} -> ${until}`);
+      monthlyRaw = monthlyRaw.concat(await fetchInsights('monthly', since, until));
+      mo++; if (mo > 12){ mo = 1; y++; }
+    }
+  }
   console.log('Monthly filas:', monthlyRaw.length);
 
   const campsData = await graphAll(`act_${AD_ACCOUNT_ID}/campaigns`, { fields: 'id,name' });
